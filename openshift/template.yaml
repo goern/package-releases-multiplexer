@@ -39,6 +39,16 @@ objects:
       ULTRAHOOK_SUBDOMAIN: "${ULTRAHOOK_SUBDOMAIN}"
       ULTRAHOOK_TARGET_HOST: "${ULTRAHOOK_TARGET_HOST}"
       ULTRAHOOK_TARGET_PORT: "8080"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka.datahub.redhat.com:443"
+
+  - kind: Secret
+    apiVersion: v1
+    metadata:
+      name: datahub-kafka
+    type: Opaque
+    data:
+      data-hub-kafka-ca.crt: >-
+        LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURMVENDQWhXZ0F3SUJBZ0lKQUo0NVRtT0lkMTZVTUEwR0NTcUdTSWIzRFFFQkN3VUFNQzB4RXpBUkJnTlYKQkFvTUNtbHZMbk4wY21sdGVta3hGakFVQmdOVkJBTU1EV05zZFhOMFpYSXRZMkVnZGpBd0hoY05NVGt3TkRJNQpNakF6TURReFdoY05NakF3TkRJNE1qQXpNRFF4V2pBdE1STXdFUVlEVlFRS0RBcHBieTV6ZEhKcGJYcHBNUll3CkZBWURWUVFEREExamJIVnpkR1Z5TFdOaElIWXdNSUlCSWpBTkJna3Foa2lHOXcwQkFRRUZBQU9DQVE4QU1JSUIKQ2dLQ0FRRUF5S2wwTTZIOEhvU1Zwckx3TnBxU1ZIWHRhU1dLVDBycGhNUzRoQnZwTTdJRG9XUU9NcnJMWHVQeAphYVhvUVR4R0pITExpSVFYVExtdGpLMkRYUjZNS0FwVk9LTmkyMlp1VE0vakRmaHd0YXRYckFMKzFzcjAvcmM2CitqWEpaWXFVOVg4cEkycmpvcFlyTUkzQm1CZnE3OWtORFpmcjk4bmtacldwV0RHNjJ0aXhxMUExSGpIbjh3TC8KUnJKdnBtdDZUcHRaek5EWTEzTnorT2I1cFZJdTVnSFdHVWVQejJnT0xkVlVqWk1MMkU3bko3WUF1bVNzdTBzTApISWxobGdDS3N4VFo3YlFma1RJNFkwMmUvZCtuTFlteUNJTEovTjBUTE5YZ1hRd1o1MVNac1dkZXNIRGVzalhrCnJnbzBvekdQcnV3c0VFbEFEK3FuK3hmU3V3bnkzd0lEQVFBQm8xQXdUakFkQmdOVkhRNEVGZ1FVcFdlRzdyTXcKUVlmc05heHBISWtkSGVrSExVUXdId1lEVlIwakJCZ3dGb0FVcFdlRzdyTXdRWWZzTmF4cEhJa2RIZWtITFVRdwpEQVlEVlIwVEJBVXdBd0VCL3pBTkJna3Foa2lHOXcwQkFRc0ZBQU9DQVFFQW1JcjJMZHFRSE95ejJOWEpzMmRvCm15UVZ1SDRlNlBDYlZmMVRKdGFZY0Q3OUVnaVpaQk9lRUt0ZnNOTVlUak1PUytTaExtTWhhbXJ3U1JEbnZ1c08KUC9oZmZZSUFLb1BmdXJvQmpMMUcvUnFvaFAzNU1hSjlxbWVkdUxjZ1pQWllpWG4zZUxOQ3lFcjZFM2hYUE0wTAo5WUZVYXJXYmh2TVlsUXBaOEhySUdTcDJGNXBNUDRhWUprRGV0WG94Y1B2UG5FdmVMcUo1d3NWeXpLbmN3TjNKCloxMXR5NzJtb3FqSFZLdU1zWGhXWHdvUE9SMzhHazMyRm4zUmord1RuU3M2emVwaGZHQjNJd0NURDZEUjNzbncKazdJTlhLV296UktkenNFZmMzNGVmN054a2xGNmFYdjh2SllLTWZnV042ZTg5TW9CaE1IOW1sWGROd2lMdW1TbgpaQT09Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K
 
   - kind: Route
     apiVersion: v1
@@ -96,7 +106,7 @@ objects:
           RUN gem install ultrahook
 
           CMD ultrahook \
-            $ULTRAHOOK_SUBDOMAIN $ULTRAHOOK_TARGET_HOST:$ULTRAHOOK_TARGET_PORT
+            $ULTRAHOOK_SUBDOMAIN http://$ULTRAHOOK_TARGET_HOST:$ULTRAHOOK_TARGET_PORT/webhook
         type: Dockerfile
       strategy:
         type: Docker
@@ -104,7 +114,7 @@ objects:
   - kind: BuildConfig
     apiVersion: build.openshift.io/v1
     metadata:
-      name: package-releases
+      name: package-releases-multiplexer
       labels:
         app: package-releases
         component: multiplexer
@@ -155,10 +165,11 @@ objects:
     spec:
       selector:
         app: package-releases
+        component: multiplexer
       ports:
         - port: 8080
           protocol: TCP
-          targetPort: 5000
+          targetPort: 8080
       sessionAffinity: None
 
   - kind: DeploymentConfig
@@ -199,17 +210,26 @@ objects:
               image: package-releases-multiplexer:latest
               imagePullPolicy: Always
               env:
-                - name: PORT
-                  value: "8080"
+                - name: KAFKA_BOOTSTRAP_SERVERS
+                  value: "kafka.datahub.redhat.com:443"
               ports:
                 - containerPort: 8080
                   protocol: TCP
+              volumeMounts:
+                - mountPath: /opt/app-root/src/secrets/
+                  name: kafka-cafile
+                  readOnly: true
             - name: ultrahook
               image: package-releases-ultrahook:latest
               imagePullPolicy: Always
               envFrom:
                 - configMapRef:
                     name: package-releases
+          volumes:
+            - name: kafka-cafile
+              secret:
+                defaultMode: 420
+                secretName: datahub-kafka
           restartPolicy: Always
       triggers:
         - type: ConfigChange
