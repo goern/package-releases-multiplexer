@@ -1,0 +1,231 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: package-releases-multiplexer-deployment
+  annotations:
+    description: Package Releases Multiplexer
+    openshift.io/display-name: "Package Releases Multiplexer"
+    version: 0.1.0
+    tags: thoth,ai-stacks,package-releases
+    template.openshift.io/documentation-url: https://github.com/Thoth-Station/
+    template.openshift.io/long-description: Package Releases Multiplexer
+    template.openshift.io/provider-display-name: Red Hat, Inc.
+  labels:
+    template: package-releases-multiplexer
+    app: package-releases
+    component: multiplexer
+
+parameters:
+  - description: Ultrahook API key
+    name: ULTRAHOOK_API_KEY
+    required: true
+  - description: Ultrahook subdomain
+    name: ULTRAHOOK_SUBDOMAIN
+    required: true
+  - description: Ultrahook host
+    name: ULTRAHOOK_TARGET_HOST
+    required: true
+
+objects:
+  - kind: ConfigMap
+    apiVersion: v1
+    metadata:
+      name: package-releases
+      labels:
+        app: package-releases
+        component: multiplexer
+    data:
+      ULTRAHOOK_API_KEY: "${ULTRAHOOK_API_KEY}"
+      ULTRAHOOK_SUBDOMAIN: "${ULTRAHOOK_SUBDOMAIN}"
+      ULTRAHOOK_TARGET_HOST: "${ULTRAHOOK_TARGET_HOST}"
+      ULTRAHOOK_TARGET_PORT: "8080"
+
+  - kind: Route
+    apiVersion: v1
+    metadata:
+      name: package-releases
+      annotations:
+        kubernetes.io/tls-acme: "true"
+      labels:
+        app: package-releases
+        component: multiplexer
+    spec:
+      to:
+        kind: Service
+        name: package-releases-multiplexer
+
+  - kind: ImageStream
+    apiVersion: v1
+    metadata:
+      name: package-releases-ultrahook
+      labels:
+        app: package-releases
+        component: ultrahook
+
+  - kind: ImageStream
+    apiVersion: v1
+    metadata:
+      name: package-releases-multiplexer
+      labels:
+        app: package-releases
+        component: multiplexer
+
+  - kind: BuildConfig
+    apiVersion: build.openshift.io/v1
+    metadata:
+      labels:
+        app: package-releases
+        component: ultrahook
+      name: package-releases-ultrahook
+    spec:
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+        limits:
+          cpu: 1000m
+          memory: 768Mi
+      output:
+        to:
+          kind: ImageStreamTag
+          name: package-releases-ultrahook:latest
+      runPolicy: Serial
+      source:
+        dockerfile: |
+          FROM ruby:2.5-slim
+          RUN gem install ultrahook
+
+          CMD ultrahook \
+            $ULTRAHOOK_SUBDOMAIN $ULTRAHOOK_TARGET_HOST:$ULTRAHOOK_TARGET_PORT
+        type: Dockerfile
+      strategy:
+        type: Docker
+
+  - kind: BuildConfig
+    apiVersion: build.openshift.io/v1
+    metadata:
+      name: package-releases
+      labels:
+        app: package-releases
+        component: multiplexer
+    spec:
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+        limits:
+          cpu: 1000m
+          memory: 768Mi
+      source:
+        type: "Git"
+        git:
+          uri: "https://github.com/goern/package-releases-multiplexer"
+          ref: "master"
+      strategy:
+        type: Source
+        sourceStrategy:
+          from:
+            kind: ImageStreamTag
+            name: s2i-thoth-ubi8-py36:latest
+          env:
+            - name: ENABLE_PIPENV
+              value: "1"
+            - name: UPGRADE_PIP_TO_LATEST
+              value: ""
+      output:
+        to:
+          kind: ImageStreamTag
+          name: package-releases-multiplexer:latest
+      triggers:
+        - type: ConfigChange
+        - type: ImageChange
+          imageChange: {}
+        - type: "Generic"
+          generic:
+            secretReference:
+              name: generic-webhook-secret
+
+  - kind: Service
+    apiVersion: v1
+    metadata:
+      name: package-releases-multiplexer
+      labels:
+        app: package-releases
+        component: multiplexer
+    spec:
+      selector:
+        app: package-releases
+      ports:
+        - port: 8080
+          protocol: TCP
+          targetPort: 5000
+      sessionAffinity: None
+
+  - kind: DeploymentConfig
+    apiVersion: v1
+    metadata:
+      labels:
+        app: package-releases
+        component: multiplexer
+      name: package-releases-multiplexer
+    spec:
+      replicas: 1
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+        limits:
+          cpu: 1000m
+          memory: 768Mi
+      selector:
+        app: package-releases
+        component: multiplexer
+      strategy:
+        resources:
+          intervalSeconds: 1
+          maxSurge: 25%
+          maxUnavailable: 25%
+          timeoutSeconds: 600
+          updatePeriodSeconds: 1
+        type: Rolling
+      template:
+        metadata:
+          labels:
+            app: package-releases
+            component: multiplexer
+        spec:
+          containers:
+            - name: multiplexer
+              image: package-releases-multiplexer:latest
+              imagePullPolicy: Always
+              env:
+                - name: PORT
+                  value: "8080"
+              ports:
+                - containerPort: 8080
+                  protocol: TCP
+            - name: ultrahook
+              image: package-releases-ultrahook:latest
+              imagePullPolicy: Always
+              envFrom:
+                - configMapRef:
+                    name: package-releases
+          restartPolicy: Always
+      triggers:
+        - type: ConfigChange
+        - imageChangeParams:
+            automatic: true
+            containerNames:
+              - multiplexer
+            from:
+              kind: ImageStreamTag
+              name: package-releases-multiplexer:latest
+          type: ImageChange
+        - imageChangeParams:
+            automatic: true
+            containerNames:
+              - ultrahook
+            from:
+              kind: ImageStreamTag
+              name: package-releases-ultrahook:latest
+          type: ImageChange
